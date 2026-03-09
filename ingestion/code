@@ -1,1 +1,190 @@
+import pyodbc
+server = r'QUAN-CORNER\SQLEXPRESS'
 
+# Creating the data warehouse
+connection = pyodbc.connect(
+    'DRIVER={ODBC Driver 17 for SQL Server};'
+    f'SERVER={server};'
+    'DATABASE=master;'
+    'Trusted_Connection=yes;',
+    autocommit=True 
+)
+
+cursor = connection.cursor()
+
+# Create database
+cursor.execute("CREATE DATABASE dwh")
+
+print("Database 'dwh' created successfully!")
+
+cursor.close()
+connection.close()
+
+
+# Connect to the newly created database
+connection = pyodbc.connect(
+    'DRIVER={ODBC Driver 17 for SQL Server};'
+    f'SERVER={server};'
+    'DATABASE=dwh;'
+    'Trusted_Connection=yes;',
+    autocommit=True
+)
+
+cursor = connection.cursor()
+
+# Table creation
+tables = [
+    """CREATE TABLE CID (
+        customer_id VARCHAR(20),
+        birth_date VARCHAR(20),
+        gender VARCHAR(10) NULL
+    )""",
+    """CREATE TABLE LOC_A101 (
+        customer_id VARCHAR(20),
+        country VARCHAR(20)
+    )""",
+    """CREATE TABLE PX_CAT_G1V2 (
+        category_id VARCHAR(10),
+        category_name VARCHAR(50),
+        subcategory VARCHAR(50),
+        MAINTENANCE VARCHAR(3)
+    )""",
+    """CREATE TABLE sales_details (
+        sale_order_number VARCHAR(10),
+        sales_product_key VARCHAR(10),
+        customer_id INT,
+        order_date INT,
+        shipping_date INT,
+        due_date INT,
+        sls_sales INT,
+        quantity INT,
+        price INT
+    )""",
+    """CREATE TABLE cust_info (
+        customer_id VARCHAR(10),
+        customer_key VARCHAR(20),
+        first_name VARCHAR(20),
+        lastname VARCHAR(20),
+        marital_status VARCHAR(5),
+        gender VARCHAR(5),
+        create_date VARCHAR(20)
+    )""",
+    """CREATE TABLE prd_info (
+        product_id INT, 
+        product_key VARCHAR(20),
+        product_name VARCHAR(50),
+        cost INT NULL,
+        product_line VARCHAR(5),
+        start_date VARCHAR(15),
+        end_date VARCHAR(15)
+    )"""
+]
+
+for stmt in tables:
+    cursor.execute(stmt)
+connection.commit()
+print("All tables created successfully!")
+
+cursor.close()
+connection.close()
+
+
+# Data ingestion
+import pandas as pd
+import numpy as np
+
+database = 'dwh'
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={database};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+## Reading the files
+dfs = {
+    "CID": pd.read_csv("G:/Users/Quan/Downloads/datasets/datasets/source_erp/CUST_AZ12.csv", sep=';'),
+    "LOC_A101": pd.read_csv("G:/Users/Quan/Downloads/datasets/datasets/source_erp/LOC_A101.csv", sep=';'),
+    "PX_CAT_G1V2": pd.read_csv("G:/Users/Quan/Downloads/datasets/datasets/source_erp/PX_CAT_G1V2.csv", sep=';'),
+    "sales_details": pd.read_csv("G:/Users/Quan/Downloads/datasets/datasets/source_crm/sales_details.csv", sep=';'),
+    "cust_info": pd.read_csv("G:/Users/Quan/Downloads/datasets/datasets/source_crm/cust_info.csv", sep=';', encoding='cp1252'),
+    "prd_info": pd.read_csv("G:/Users/Quan/Downloads/datasets/datasets/source_crm/prd_info.csv", sep=';')
+}
+
+## Define table columns
+table_columns = {
+    "CID": ["customer_id", "birth_date", "gender"],
+    "LOC_A101": ["customer_id", "country"],
+    "PX_CAT_G1V2": ["category_id", "category_name", "subcategory", "MAINTENANCE"],
+    "sales_details": ["sale_order_number","sales_product_key","customer_id","order_date","shipping_date","due_date","sls_sales","quantity","price"],
+    "cust_info": ["customer_id","customer_key","first_name","lastname","marital_status","gender","create_date"],
+    "prd_info": ["product_id","product_key","product_name","cost","product_line","start_date","end_date"]
+}
+
+## Convert NaNs to None so that it is ingestible
+for key in dfs:
+    dfs[key] = dfs[key].replace({np.nan: None, "": None})
+
+## Insert function
+def insert_table(df, table_name, columns):
+    placeholders = ", ".join(["?"] * len(columns))
+    insert_sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+    
+    for idx, row in df.iterrows():
+        data = list(row)
+        # Ensure any remaining float NaN is converted to None
+        data = [None if isinstance(x, float) and pd.isna(x) else x for x in data]
+        try:
+            cursor.execute(insert_sql, data)
+        except Exception as e:
+            print(f"Error inserting row {idx} into {table_name}")
+            print("Row data:", data)
+            print("Error:", e)
+    conn.commit()
+    print(f"✅ Inserted {len(df)} rows into {table_name}")
+
+## Execute the insertion
+for table_name, df in dfs.items():
+    insert_table(df, table_name, table_columns[table_name])
+
+## Preview one table
+cursor.execute("SELECT TOP 50 * FROM cust_info")
+for row in cursor.fetchall():
+    print(row)
+
+cursor.close()
+conn.close()
+
+print(dfs)
+
+# Drop table function and code if needed
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={database};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+def drop_all_tables(cursor, table_list):
+    for table in table_list:
+        cursor.execute(f"DROP TABLE {table}")
+        print(f"Table {table} dropped.")
+    cursor.connection.commit()
+    print("All tables dropped successfully!")
+
+drop_all_tables(cursor, listed_table)
+
+cursor.close()
+conn.close()
+
+
+# Truncate function just to remove all data from table if needed
+listed_table = ["CID", "LOC_A101", "PX_CAT_G1V2", "sales_details", "cust_info", "prd_info"]
+
+def truncate_all_tables(cursor, table_list):
+    for table in table_list:
+        cursor.execute(f"TRUNCATE TABLE {table}")
+        print(f"Table {table} truncated.")
+    cursor.connection.commit()
+    print("All tables truncated successfully!")
+
+truncate_all_tables(cursor, listed_table)
+
+cursor.close()
+conn.close()
