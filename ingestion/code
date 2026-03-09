@@ -139,7 +139,7 @@ def insert_table(df, table_name, columns):
             print("Row data:", data)
             print("Error:", e)
     conn.commit()
-    print(f"✅ Inserted {len(df)} rows into {table_name}")
+    print(f"Inserted {len(df)} rows into {table_name}")
 
 ## Execute the insertion
 for table_name, df in dfs.items():
@@ -153,7 +153,6 @@ for row in cursor.fetchall():
 cursor.close()
 conn.close()
 
-print(dfs)
 
 # Drop table function and code if needed
 conn = pyodbc.connect(
@@ -166,7 +165,6 @@ def drop_all_tables(cursor, table_list):
         cursor.execute(f"DROP TABLE {table}")
         print(f"Table {table} dropped.")
     cursor.connection.commit()
-    print("All tables dropped successfully!")
 
 drop_all_tables(cursor, listed_table)
 
