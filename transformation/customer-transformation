@@ -1,0 +1,194 @@
+import pyodbc
+import pandas as pd
+import numpy as np
+
+server = r'QUAN-CORNER\SQLEXPRESS'
+database = "dwh"
+
+# Establish connection
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={database};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+# SQL query for missing values from the cust_info table
+## Method 1: Get column names from cursor (this way is good for when there are many columns in the table)
+cursor.execute("SELECT TOP 1 * FROM cust_info")  # just to get the column names
+columns = [column[0] for column in cursor.description]
+
+where_clause = " OR ".join([f"{col} IS NULL" for col in columns])
+query = f"SELECT * FROM cust_info WHERE {where_clause}"
+
+cursor.execute(query)
+rows = cursor.fetchall()
+
+for row in rows[:20]:
+    print(row)
+
+## Method 2: Simply manually stating the column names
+query = """
+Select *
+FROM cust_info
+WHERE customer_id IS NULL
+    OR customer_key IS NULL
+    OR first_name IS NULL
+    OR lastname IS NULL
+    OR marital_status IS NULL
+    OR gender IS NULL
+    OR create_date IS NULL
+"""
+
+cursor.execute(query)
+rows = cursor.fetchall()
+
+for row in rows[:20]:
+    print(row)
+
+len(rows)
+
+#---------------------------------------------------------------------------------------------------------------
+# Pandas data import
+## Snatching customer data from warehouse and storing as pandas dataframe
+cust_info_df = pd.read_sql(
+    "SELECT * FROM dbo.cust_info"
+    , conn)
+
+CID_df = pd.read_sql(
+    "SELECT * FROM dbo.CID"
+    , conn
+)
+
+cursor.close()
+conn.close()
+
+# Checking if the data has been imported properly
+print(cust_info_df.head(10))
+
+print(CID_df.head(10))
+
+#---------------------------------------------------------------------------------------------------------------
+# Cleaning phase
+## Removing customers with mismatch between CID and cust_info table
+cust_info_df['id_last5'] = cust_info_df['customer_id'].str[-5:] # Normalizing the id format
+CID_df['id_last5'] = CID_df['customer_id'].str[-5:]
+
+### Mismatch IDs
+mismatched_ids = cust_info_df[~cust_info_df['id_last5'].isin(CID_df['id_last5'])]
+print(mismatched_ids)
+
+### Remove those rows in the cust_info dataframe
+cust_info_df = cust_info_df[cust_info_df['id_last5'].isin(CID_df['id_last5'])]
+mismatched_ids = cust_info_df[~cust_info_df['id_last5'].isin(CID_df['id_last5'])] # Check
+print(mismatched_ids)
+
+### Identifying customers with missing data
+null_rows = cust_info_df[
+    cust_info_df['first_name'].isnull() |
+    cust_info_df['lastname'].isnull() |
+    cust_info_df['marital_status'].isnull()
+]
+
+len(null_rows)
+print(null_rows) # These rows does not have fillable data that can be done by joining with the other custonmer table, consideration to either remove or not?...
+
+
+### Identifying customers with leading spaces
+leading_space_rows = cust_info_df[
+    cust_info_df['first_name'].str.startswith(' ', na = False) |
+    cust_info_df['lastname'].str.startswith(' ', na = False) |
+    cust_info_df['marital_status'].str.startswith(' ', na = False) |
+    cust_info_df['gender'].str.startswith(' ', na = False)
+]
+
+print(leading_space_rows) # Rows with formatting error
+
+### Fixing rows with leading spaces
+cust_info_df['first_name'] = cust_info_df['first_name'].str.strip()
+cust_info_df['lastname'] = cust_info_df['lastname'].str.strip()
+cust_info_df['marital_status'] = cust_info_df['marital_status'].str.strip()
+cust_info_df['gender'] = cust_info_df['gender'].str.strip()
+
+cust_info_df = cust_info_df.drop(columns=['id_last5']) # drop the normalized id column used for previous checking
+
+#---------------------------------------------------------------------------------------------------------------
+# Loading the cleaned cust_info data into schema
+conn = pyodbc.connect(
+    'DRIVER={ODBC Driver 17 for SQL Server};'
+    f'SERVER={server};'
+    'DATABASE=master;'
+    'Trusted_Connection=yes;',
+    autocommit=True 
+)
+
+cursor = conn.cursor()
+
+# Create schema database
+cursor.execute("CREATE DATABASE schema_database")
+
+cursor.close()
+conn.close()
+
+
+# Create table for insertion
+conn = pyodbc.connect(
+    'DRIVER={ODBC Driver 17 for SQL Server};'
+    f'SERVER={server};'
+    'DATABASE=schema_database;'
+    'Trusted_Connection=yes;',
+    autocommit=True 
+)
+
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE cust_info (
+    customer_id VARCHAR(10),
+    customer_key VARCHAR(20),
+    first_name VARCHAR(20),
+    lastname VARCHAR(20),
+    marital_status VARCHAR(5),
+    gender VARCHAR(5),
+    create_date VARCHAR(20)
+)
+""")
+conn.commit()
+cursor.close()
+conn.close()
+
+# Inserting the cleaned data into the table 
+conn = pyodbc.connect(
+    'DRIVER={ODBC Driver 17 for SQL Server};'
+    f'SERVER={server};'
+    'DATABASE=schema_database;'
+    'Trusted_Connection=yes;',
+    autocommit=True 
+)
+
+cursor = conn.cursor()
+
+# Replace NaN and empty strings with None
+cust_info_df = cust_info_df.replace({np.nan: None, "": None})
+
+columns = ['customer_id', 'customer_key', 'first_name', 'lastname', 'marital_status', 'gender', 'create_date']
+
+# Insert function
+def insert_table(df, table_name, columns):
+    placeholders = ", ".join(["?"] * len(columns))
+    insert_sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+    
+    for idx, row in df.iterrows():
+        data = list(row[columns])
+        # Ensure any remaining float NaN is converted to None
+        data = [None if isinstance(x, float) and pd.isna(x) else x for x in data]
+        try:
+            cursor.execute(insert_sql, data)
+        except Exception as e:
+            print(f"Error inserting row {idx} into {table_name}")
+            print("Row data:", data)
+            print("Error:", e)
+    
+    conn.commit()
+    print(f"Inserted {len(df)} rows into {table_name}")
+
+# Insert into table
+insert_table(cust_info_df, 'cust_info', columns)
