@@ -1,0 +1,155 @@
+import pyodbc
+import pandas as pd
+
+
+server = r'DESKTOP-VON8MR5\SQLEXPRESS'
+database = "dwh"
+
+# Establish connection
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={database};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+# Import the data into pandas dataframe
+product_info_df = pd.read_sql(
+    "SELECT * FROM dbo.prd_info"
+    , conn)
+
+print(product_info_df.head(10)) # Check
+
+
+product_info_df['category_id'] = product_info_df['product_key'].str[:5] # Normalizing the key so that we can join
+product_info_df["category_id"] = product_info_df["category_id"].str.replace("-", "_") # Normalize further
+product_info_df["cost"] = product_info_df["cost"].fillna(0) # Change null costs to 0
+product_info_df['product_line'] = ( # Replace short letter to readable words
+    product_info_df['product_line']
+    .str.strip()  # remove accidental spaces
+    .replace({
+        "R": "Road",
+        "S": "Sport",
+        "M": "Mountain",
+        "T": "Touring"
+    })
+    .fillna("Not available")
+)
+
+product_info_df['start_date'] = pd.to_datetime(product_info_df['start_date'], errors='coerce')
+product_info_df['end_date'] = pd.to_datetime(product_info_df['end_date'], errors='coerce')
+
+product_info_df = product_info_df.sort_values(["product_key", "product_id"])
+print(product_info_df.head(20))
+
+product_info_df["end_date"] = (
+    product_info_df.groupby("product_key")["start_date"]
+    .shift(-1) - pd.Timedelta(days=1)
+)
+
+product_info_df["cost"].isnull().any()
+print(product_info_df.head(10)) # Check
+
+
+# Convert datetime columns to string, keep NaT as None
+product_info_df['start_date'] = product_info_df['start_date'].apply(
+    lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else None
+)
+product_info_df['end_date'] = product_info_df['end_date'].apply(
+    lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else None
+)
+
+print(product_info_df.head(10))
+cursor.close()
+conn.close()
+
+#---------------------------------------------------------------------------
+# Inserting into the schema database
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={"schema_database"};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+# Creating the table in the schema
+cursor.execute("""
+CREATE TABLE prd_info_transformed (
+    product_id INT, 
+    product_key VARCHAR(20),
+    product_name VARCHAR(50),
+    cost INT NULL,
+    product_line VARCHAR(20),
+    start_date VARCHAR(20),
+    end_date VARCHAR(20),
+    category_id VARCHAR(5)
+);
+""")
+
+cursor.commit()
+cursor.close()
+conn.close()
+
+# Pushing the transformed data
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={"schema_database"};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+columns = ['product_id', 'product_key', 'product_name', 'cost', 'product_line', 'start_date', 'end_date', 'category_id']
+
+def insert_table(df, table_name, columns):
+    placeholders = ", ".join(["?"] * len(columns))
+    insert_sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+    
+    for idx, row in df.iterrows():
+        data = list(row[columns])
+        # Ensure any remaining float NaN is converted to None
+        data = [None if isinstance(x, float) and pd.isna(x) else x for x in data]
+        try:
+            cursor.execute(insert_sql, data)
+        except Exception as e:
+            print(f"Error inserting row {idx} into {table_name}")
+            print("Row data:", data)
+            print("Error:", e)
+    
+    conn.commit()
+    print(f"Inserted {len(df)} rows into {table_name}")
+
+# Insert into table
+insert_table(product_info_df, 'prd_info_transformed', columns)
+
+cursor.commit()
+cursor.close()
+conn.close()
+
+# Drop table function and code if needed
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={"schema_database"};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+listed_table = ["prd_info_transformed"]
+
+def drop_all_tables(cursor, table_list):
+    for table in table_list:
+        cursor.execute(f"DROP TABLE {table}")
+        print(f"Table {table} dropped.")
+    cursor.connection.commit()
+    print("All tables dropped successfully!")
+
+drop_all_tables(cursor, listed_table)
+
+cursor.close()
+conn.close()
+
+
+# Truncate function just to remove all data from table if needed
+
+def truncate_all_tables(cursor, table_list):
+    for table in table_list:
+        cursor.execute(f"TRUNCATE TABLE {table}")
+        print(f"Table {table} truncated.")
+    cursor.connection.commit()
+    print("All tables truncated successfully!")
+
+truncate_all_tables(cursor, listed_table)
+
+cursor.close()
+conn.close()
