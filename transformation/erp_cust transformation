@@ -1,1 +1,101 @@
+import pyodbc
+import pandas as pd
+import numpy as np
 
+server = r'DESKTOP-VON8MR5\SQLEXPRESS'
+database = "dwh"
+
+# Establish connection
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={database};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+# Import the data into pandas dataframe
+CID_df = pd.read_sql(
+    "SELECT * FROM dbo.CID"
+    , conn)
+
+print(CID_df.head(10))
+
+cursor.close()
+conn.close()
+
+# Normalizing the id similar to the previously done customer_info table
+CID_df['customer_id'] = CID_df['customer_id'].astype(str).str[-5:]
+
+# Fixing the gender column to show either male, female, or not available
+CID_df['gender'] = (
+    CID_df['gender']
+    .astype(str)
+    .str.strip()
+    .replace({'': np.nan})
+    .str.upper()
+    .replace({
+        'F': 'Female',
+        'M': 'Male',
+        'FEMALE': 'Female',
+        'MALE': 'Male'
+    })
+    .fillna('Not Available')
+)
+
+# Check the code
+clean_gender = CID_df['gender'].astype(str).str.strip().str.upper()
+print(clean_gender.unique())
+
+
+# Loading it to schema
+
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={"schema_database"};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+# Creating the table in the schema
+cursor.execute("""
+CREATE TABLE CID_transformed (
+        customer_id INT,
+        birth_date VARCHAR(20),
+        gender VARCHAR(20) 
+    );
+""")
+
+conn.commit()
+cursor.close()
+conn.close()
+
+
+# Inserting the transformed data into the newly created table 
+
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={"schema_database"};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+columns = ['customer_id', 'birth_date', 'gender']
+
+def insert_table(df, table_name, columns):
+    placeholders = ", ".join(["?"] * len(columns))
+    insert_sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+    
+    for idx, row in df.iterrows():
+        data = list(row[columns])
+        # Ensure any remaining float NaN is converted to None
+        data = [None if isinstance(x, float) and pd.isna(x) else x for x in data]
+        try:
+            cursor.execute(insert_sql, data)
+        except Exception as e:
+            print(f"Error inserting row {idx} into {table_name}")
+            print("Row data:", data)
+            print("Error:", e)
+    
+    conn.commit()
+    print(f"Inserted {len(df)} rows into {table_name}")
+
+# Insert into table
+insert_table(CID_df, 'CID_transformed', columns)
+
+cursor.commit()
+cursor.close()
+conn.close()
