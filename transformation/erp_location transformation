@@ -1,1 +1,117 @@
 
+import pyodbc
+import pandas as pd
+import numpy as np
+
+server = r'DESKTOP-VON8MR5\SQLEXPRESS'
+database = "dwh"
+
+# Establish connection
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={database};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+# Import the data into pandas dataframe
+loc_df = pd.read_sql(
+    "SELECT * FROM dbo.LOC_A101"
+    , conn)
+
+print(loc_df.head(10))
+loc_df = loc_df.iloc[1:]
+
+cursor.close()
+conn.close()
+
+# Fixing the id column
+loc_df['country'].unique()
+
+# Clean whitespace + normalize
+loc_df['country'] = (
+    loc_df['country']
+    .astype(str)
+    .str.strip()
+)
+
+# Replace empty strings with NaN
+loc_df['country'] = loc_df['country'].replace('', np.nan)
+
+# Standardize the untry names
+loc_df['country'] = loc_df['country'].replace({
+    'US': 'United States',
+    'USA': 'United States',
+    'United States': 'United States',
+
+    'DE': 'Germany',
+    'Germany': 'Germany',
+
+    'UK': 'United Kingdom',
+    'United Kingdom': 'United Kingdom',
+
+    'FR': 'France',
+    'France': 'France',
+
+    'CA': 'Canada',
+    'Canada': 'Canada',
+
+    'AU': 'Australia',
+    'Australia': 'Australia'
+})
+
+# Fill missing values
+loc_df['country'] = loc_df['country'].fillna('Not Available')
+
+# Check
+loc_df['country'].unique()
+
+# Creating the new transformed table in the schema database
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={"schema_database"};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+# Creating the table in the schema
+cursor.execute("""
+CREATE TABLE loc_transformed (
+        customer_id INT,
+        country VARCHAR(20)
+    );
+""")
+
+conn.commit()
+cursor.close()
+conn.close()
+
+# Inserting the transformed data into the newly created table 
+
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={"schema_database"};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+columns = ['customer_id', 'country']
+
+def insert_table(df, table_name, columns):
+    placeholders = ", ".join(["?"] * len(columns))
+    insert_sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+    
+    for idx, row in df.iterrows():
+        data = list(row[columns])
+        # Ensure any remaining float NaN is converted to None
+        data = [None if isinstance(x, float) and pd.isna(x) else x for x in data]
+        try:
+            cursor.execute(insert_sql, data)
+        except Exception as e:
+            print(f"Error inserting row {idx} into {table_name}")
+            print("Row data:", data)
+            print("Error:", e)
+    
+    conn.commit()
+    print(f"Inserted {len(df)} rows into {table_name}")
+
+# Insert into table
+insert_table(loc_df, 'loc_transformed', columns)
+
+cursor.commit()
+cursor.close()
+conn.close()
