@@ -1,0 +1,173 @@
+import pyodbc
+import pandas as pd
+import numpy as np
+
+server = r'DESKTOP-VON8MR5\SQLEXPRESS'
+database = "dwh"
+
+# Establish connection
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={database};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+# Import the data into pandas dataframe
+sales_details_df = pd.read_sql(
+    "SELECT * FROM dbo.sales_details"
+    , conn)
+
+print(sales_details_df.head(10))
+
+cursor.close()
+conn.close()
+# Converting the order, shipping, and due date date columns to the proper date format
+sales_details_df['order_date'] = pd.to_datetime(
+    sales_details_df['order_date'].astype(str),
+    format='%Y%m%d',
+    errors='coerce'
+)
+
+sales_details_df['shipping_date'] = pd.to_datetime(
+    sales_details_df['shipping_date'].astype(str),
+    format='%Y%m%d',
+    errors='coerce'
+)
+
+sales_details_df['due_date'] = pd.to_datetime(
+    sales_details_df['due_date'].astype(str),
+    format='%Y%m%d',
+    errors='coerce'
+)
+
+print(sales_details_df["shipping_date"])
+print(sales_details_df["order_date"])
+print(sales_details_df["due_date"])
+
+# For order dates from the same order (order number), set the same order date for all of the items 
+
+group_order_date = sales_details_df.groupby('sale_order_number')['order_date'].transform('first')
+
+sales_details_df['order_date'] = sales_details_df['order_date'].fillna(group_order_date)
+
+sales_details_df['order_date'] = sales_details_df.groupby('sale_order_number')['order_date'].transform('first')
+
+sales_details_df['order_date'] = sales_details_df['order_date'].fillna(sales_details_df['shipping_date'])
+
+print(sales_details_df["order_date"])
+
+
+# Fixing the sales and price accordingly
+def fix_sales_row(row, tol=1e-9):
+    sales = row['sls_sales']
+    qty = row['quantity']
+    price = row['price']
+
+    # Step 1: enforce basic assumptions
+    if pd.notna(price):
+        price = abs(price)   # unit price should be positive
+
+    if pd.notna(qty):
+        qty = abs(qty)       # quantity should be positive
+
+    # Step 2: fill missing price from sales and quantity
+    if pd.isna(price) and pd.notna(sales) and pd.notna(qty) and qty != 0:
+        price = abs(sales) / qty
+
+    # Step 3: fill missing sales from quantity and price
+    if pd.isna(sales) and pd.notna(qty) and pd.notna(price):
+        sales = qty * price
+
+    # Step 4: fix zero sales if quantity and price exist
+    if pd.notna(sales) and sales == 0 and pd.notna(qty) and pd.notna(price):
+        sales = qty * price
+
+    # Step 5: if all 3 exist but are inconsistent, repair intelligently
+    if pd.notna(sales) and pd.notna(qty) and pd.notna(price) and qty != 0 and price != 0:
+        expected_abs_sales = qty * price
+
+        if not np.isclose(abs(sales), expected_abs_sales, atol=tol):
+            inferred_qty = abs(sales) / price
+            inferred_price = abs(sales) / qty
+
+            # If inferred quantity is basically an integer, prefer fixing quantity
+            if np.isclose(inferred_qty, round(inferred_qty), atol=tol):
+                qty = int(round(inferred_qty))
+            else:
+                price = inferred_price
+
+        # Rebuild sales using corrected values, preserving original sign if sales existed
+        sign = -1 if pd.notna(sales) and sales < 0 else 1
+        sales = sign * qty * price
+
+    # Final cleanup
+    if pd.notna(qty):
+        qty = int(round(qty))
+
+    row['sls_sales'] = sales
+    row['quantity'] = qty
+    row['price'] = price
+    return row
+
+sales_details_df = sales_details_df.apply(fix_sales_row, axis=1)
+cols = ['sls_sales', 'quantity', 'price']
+sales_details_df[cols] = sales_details_df[cols].abs()
+
+sales_details_df['price'] = sales_details_df['price'].astype(int)
+sales_details_df['sls_sales'] = sales_details_df['sls_sales'].astype(int)
+# Loading it to schema
+
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={"schema_database"};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+# Creating the table in the schema
+cursor.execute("""
+CREATE TABLE sales_details_transformed (
+    sale_order_number VARCHAR(10),
+    sales_product_key VARCHAR(10),
+    customer_id INT,
+    order_date DATE,
+    shipping_date DATE,
+    due_date DATE,
+    sls_sales INT,
+    quantity INT,
+    price INT
+    );
+""")
+
+conn.commit()
+cursor.close()
+conn.close()
+
+conn = pyodbc.connect(
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={"schema_database"};Trusted_Connection=yes;'
+)
+cursor = conn.cursor()
+
+columns = ['sale_order_number', 'sales_product_key', 'customer_id', 'order_date', 'shipping_date', 'due_date', 'sls_sales', 'quantity', 'price']
+
+def insert_table(df, table_name, columns):
+    placeholders = ", ".join(["?"] * len(columns))
+    insert_sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+    
+    for idx, row in df.iterrows():
+        data = list(row[columns])
+        # Ensure any remaining float NaN is converted to None
+        data = [None if isinstance(x, float) and pd.isna(x) else x for x in data]
+        try:
+            cursor.execute(insert_sql, data)
+        except Exception as e:
+            print(f"Error inserting row {idx} into {table_name}")
+            print("Row data:", data)
+            print("Error:", e)
+    
+    conn.commit()
+    print(f"Inserted {len(df)} rows into {table_name}")
+
+# Insert into table
+insert_table(sales_details_df, 'sales_details_transformed', columns)
+
+cursor.commit()
+cursor.close()
+conn.close()
